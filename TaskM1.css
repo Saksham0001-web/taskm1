@@ -1,55 +1,47 @@
 #include <DHT.h>                // Including the DHT22 sensor library for temperature & humidity
 
 // PIN CONFIGURATION 
-#define PIN_GAS      8          // Gas sensor connected to digital pin 8 
-#define PIN_TRIGGER  7          // Ultrasonic trigger pin 
+#define PIN_SOIL     10          // Soil moisture digital output connected to digital pin 10
+#define PIN_TRIGGER  5          // Ultrasonic trigger pin
 #define PIN_ECHO     9          // Ultrasonic echo pin
 #define PIN_DHT      2          // DHT22 data pin
 
-#define LED_ALERT    13         // Alert LED
+#define LED_ALERT    12         // Alert LED
 #define LED_STATUS   6          // Status LED 
 
-#define SENSOR_TYPE  DHT22      // Using the DHT22 sensor
+#define DHTTYPE      DHT22      // Using the DHT22 sensor
 
-DHT climateSensor(PIN_DHT, SENSOR_TYPE);   // Create DHT sensor object
+DHT dht(PIN_DHT, DHTTYPE);      // Creating DHT sensor object
 
 /* These are the system flags */
-volatile bool gasDetected = false;      // This sets TRUE when gas interrupt occurs
-volatile bool echoHighCaptured = false; // This tracks rising edge of ultrasonic echo
-volatile bool echoLowCaptured = false;  // This tracks falling edge of ultrasonic echo
-volatile unsigned long startTime = 0;   // This is the time when echo pulse started
-volatile unsigned long endTime = 0;     // It is the time when echo pulse ended
-volatile bool timerFlag = false;        // It is the flag set by timer interrupt every 1 second
-volatile bool oneSecondTick = false;   // This flag becomes true every 1 second from timer interrupt
+volatile bool echoStarted = false;        // This tracks rising edge of ultrasonic echo
+volatile bool echoFinished = false;        // This becomes TRUE when echo pulse is completed
+volatile unsigned long echoStartTime = 0;     // This is the time when echo pulse started
+volatile unsigned long echoEndTime = 0;       // It is the time when echo pulse ended
+volatile bool timerTick = false;       // It is the flag set by timer interrupt every 1 second
+
 
 /* These are the sensor values  */
-float tempValue = 0.0;          // It helps in storing temperature value
-float humidityValue = 0.0;      // It helps in storing humidity value
-float objectDistance = 0.0;     // It helps in storing calculated distance
-
-bool alertActive = false;       // It crevents repeated alert printing
+float temperature = 0.0;        // It helps in storing temperature value
+float humidity = 0.0;           // It helps in storing humidity value
+float distanceCM = 0.0;         // It helps in storing calculated distance
+bool soilState = false;         // It stores the soil condition (DRY or WET)
 
 
 /* This is the pin change interrupt  */
 ISR(PCINT0_vect)                // This interrupt runs whenever D8–D13 pin state changes
 {
-  // Gas sensor interrupt check
-  if (digitalRead(PIN_GAS) == LOW)   // It is the gas sensor active 
-  {
-    gasDetected = true;              // It sets the flag 
-  }
-
   // Ultrasonic echo timing logic
-  if (digitalRead(PIN_ECHO) == HIGH && !echoHighCaptured) // Rising edge detected
+  if (digitalRead(PIN_ECHO) == HIGH && !echoStarted) // Rising edge detected
   {
-    startTime = micros();            // It records start time of echo pulse
-    echoHighCaptured = true;         // This marks rising edge captured
+    echoStartTime = micros();          // It records start time of echo pulse
+    echoStarted = true;            // This marks rising edge captured
   }
-  else if (digitalRead(PIN_ECHO) == LOW && echoHighCaptured) // Falling edge detected
+  else if (digitalRead(PIN_ECHO) == LOW && echoStarted) // Falling edge detected
   {
-    endTime = micros();              // It records end time of echo pulse
-    echoLowCaptured = true;          // This informs loop distance ready
-    echoHighCaptured = false;        // this reset for next measurement
+    echoEndTime = micros();            // It records end time of echo pulse
+    echoFinished = true;            // This informs loop distance ready
+    echoStarted = false;           // This resets for next measurement
   }
 }
 
@@ -57,7 +49,7 @@ ISR(PCINT0_vect)                // This interrupt runs whenever D8–D13 pin sta
 /* TIMER1 INTERRUPT (1 SECOND)  */
 ISR(TIMER1_COMPA_vect)          // It runs automatically every 1 second
 {
-  oneSecondTick = true;         // Only set a flag
+  timerTick = true;             // Only set a flag
 }
 
 
@@ -66,19 +58,18 @@ void setup()
 {
   Serial.begin(9600);           // This starts the serial communication
 
-  pinMode(PIN_GAS, INPUT);      // This is the gas sensor input
+  pinMode(PIN_SOIL, INPUT);     // This is the soil moisture sensor input
   pinMode(PIN_TRIGGER, OUTPUT); // This is the ultrasonic trigger output
   pinMode(PIN_ECHO, INPUT);     // It is the ultrasonic echo input
 
   pinMode(LED_ALERT, OUTPUT);   // Alerts the LED output
   pinMode(LED_STATUS, OUTPUT);  // Status LED output
 
-  climateSensor.begin();        // Initializing the DHT22 sensor
+  dht.begin();                  // Initializing the DHT22 sensor
 
   /* Enable Pin Change Interrupt for PORTB */
-  PCICR |= (1 << PCIE0);        // THis enables the PCINT group for pins D8–D13
-  PCMSK0 |= (1 << PCINT0);      // THis enables the interrupt on digital pin 
-  PCMSK0 |= (1 << PCINT1);      // THis enables the interrupt on digital pin
+  PCICR |= (1 << PCIE0);        // This enables the PCINT group for pins D8–D13
+  PCMSK0 |= (1 << PCINT1);      // This enables the interrupt on digital pin 9 (echo)
 
   /* Configure Timer1 for 1 second interval */
   cli();                        // It disables the global interrupts during configuration
@@ -93,7 +84,7 @@ void setup()
 
   TIMSK1 |= (1 << OCIE1A);      // This enables the Timer1 compare match interrupt
 
-  sei();                        // THis enables the global interrupts
+  sei();                        // This enables the global interrupts
 
   Serial.println("System Booted Successfully");
 }
@@ -103,58 +94,62 @@ void setup()
 void loop()
 {
   /* 1 SECOND PERIODIC TASK  */
-  if (oneSecondTick)            // It runs once every second
+  if (timerTick)                // It runs once every second
   {
-    oneSecondTick = false;      // IT resets the flag
+    timerTick = false;          // It resets the flag
 
     // Status LED heartbeat
     digitalWrite(LED_STATUS, !digitalRead(LED_STATUS)); // Toggle the LED
 
     // Read temperature & humidity
-    tempValue = climateSensor.readTemperature(); // Reading the value of temperature
-    humidityValue = climateSensor.readHumidity(); // Reading the value of humidity
+    temperature = dht.readTemperature(); // Reading the value of temperature
+    humidity = dht.readHumidity();       // Reading the value of humidity
+
+    Serial.print("Temperature: ");
+    Serial.println(temperature);
+    Serial.print("Humidity: ");
+    Serial.println(humidity);
+
+    // Read soil moisture condition
+    if (digitalRead(PIN_SOIL) == LOW)    // LOW means soil is wet
+    {
+      soilState = true;                  // Set soil state as WET
+      Serial.println("Soil: WET");
+    }
+    else
+    {
+      soilState = false;                 // Set soil state as DRY
+      Serial.println("Soil: DRY");
+    }
 
     // Trigger ultrasonic sensor pulse
     digitalWrite(PIN_TRIGGER, LOW);
     delayMicroseconds(2);
     digitalWrite(PIN_TRIGGER, HIGH);
-    delayMicroseconds(10);      // Sendign the pulse of 10µs 
+    delayMicroseconds(10);      // Sending the pulse of 10µs 
     digitalWrite(PIN_TRIGGER, LOW);
-
-    Serial.println("===== CURRENT READINGS =====");
-    Serial.print("Temperature: ");
-    Serial.println(tempValue);
-    Serial.print("Humidity: ");
-    Serial.println(humidityValue);
   }
 
-  /*  DISTANCE CALCULATION  */
-  if (echoLowCaptured)          // The echo pulse finished
+  /* DISTANCE CALCULATION  */
+  if (echoFinished)                 // The echo pulse finished
   {
-    echoLowCaptured = false;    // Reseting flag
+    echoFinished = false;           // Resetting flag
 
-    unsigned long pulseDuration = endTime - startTime; // It is the time of sound travel
-    objectDistance = pulseDuration * 0.034 / 2;        // It convert to cm distance
+    unsigned long duration = echoEndTime - echoStartTime; // It is the time of sound travel
+    distanceCM = duration * 0.034 / 2;      // It converts to cm distance
 
     Serial.print("Distance: ");
-    Serial.println(objectDistance);
+    Serial.println(distanceCM);
+    Serial.println();
   }
 
-  /* ALERT CONDITION CHECK */
-  if (gasDetected && objectDistance < 50) // THis is the danger condition
+  /* LED CONDITION CHECK */
+  if (soilState == true && distanceCM < 50) // This is the condition
   {
-    if (!alertActive)
-    {
-      Serial.println("!!! WARNING: GAS DETECTED + OBJECT NEARBY !!!");
-      digitalWrite(LED_ALERT, HIGH); // Turing the alarm ON
-      alertActive = true;            // Avoiding the repeated printing
-    }
+    digitalWrite(LED_ALERT, HIGH);          // Turning the LED ON
   }
   else
   {
-    digitalWrite(LED_ALERT, LOW);    // Turning the alarm OFF
-    alertActive = false;
+    digitalWrite(LED_ALERT, LOW);           // Turning the LED OFF
   }
-
-  gasDetected = false;               // Reseting gas flag for next interrupt
 }
